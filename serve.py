@@ -100,6 +100,8 @@ def stats():
             "citation_edges": count("citation_edges"),
             "claims": count("paper_claims"),
             "pdfs": pdfs_total,
+            "chunks": count("document_chunks"),
+            "doc_edges": count("document_edges"),
             "organs": organs,
         }
     finally:
@@ -384,6 +386,190 @@ def paper_detail(paper_id: str):
                 }
 
         return paper
+    finally:
+        con.close()
+
+
+@app.get("/api/papers/{paper_id}/document")
+def paper_document(paper_id: str):
+    """
+    Full parsed document for a paper: chunks grouped by section with
+    cross-reference edges.
+
+    Returns a structure optimized for the Document tab in the UI:
+    - sections: ordered list of {heading, chunks} groups
+    - cross_refs: list of {source_chunk_id, target_chunk_id} for
+      intra-document references (e.g. paragraph mentioning "Table 1"
+      → the Table 1 caption chunk)
+    - stats: parse quality, chunk/section counts
+    """
+    con = get_con()
+    try:
+        tables = [
+            r[0]
+            for r in con.execute(
+                "SELECT table_name FROM information_schema.tables WHERE table_schema='main'"
+            ).fetchall()
+        ]
+
+        if "document_chunks" not in tables:
+            return {"sections": [], "cross_refs": [], "stats": None}
+
+        # Fetch all chunks for this paper in reading order
+        rows = con.execute("""
+            SELECT chunk_id, page_num, chunk_order, chunk_type, section_name,
+                   text, font_name, font_size, x_pos, y_pos, parse_quality
+            FROM document_chunks
+            WHERE paper_id = ?
+            ORDER BY page_num, chunk_order
+        """, [paper_id]).fetchall()
+
+        if not rows:
+            return {"sections": [], "cross_refs": [], "stats": None}
+
+        # Group chunks into sections: each heading starts a new section.
+        # Chunks before the first heading go into a preamble section.
+        sections = []
+        current_section = {"heading": None, "section_name": None, "chunks": []}
+
+        for chunk_id, page_num, chunk_order, chunk_type, section_name, \
+                text, font_name, font_size, x_pos, y_pos, parse_quality in rows:
+            chunk = {
+                "chunk_id": chunk_id,
+                "page_num": page_num,
+                "chunk_type": chunk_type,
+                "section_name": section_name,
+                "text": text,
+                "font_size": font_size,
+            }
+
+            if chunk_type == "heading":
+                # Save current section if it has content
+                if current_section["chunks"] or current_section["heading"]:
+                    sections.append(current_section)
+                # Start new section
+                current_section = {
+                    "heading": chunk,
+                    "section_name": section_name,
+                    "chunks": [],
+                }
+            else:
+                current_section["chunks"].append(chunk)
+
+        # Don't forget the last section
+        if current_section["chunks"] or current_section["heading"]:
+            sections.append(current_section)
+
+        # Fetch cross-reference edges for this paper
+        cross_refs = []
+        if "document_edges" in tables:
+            ref_rows = con.execute("""
+                SELECT source_id, target_id
+                FROM document_edges
+                WHERE paper_id = ? AND edge_type = 'references'
+            """, [paper_id]).fetchall()
+            cross_refs = [
+                {"source_id": r[0], "target_id": r[1]}
+                for r in ref_rows
+            ]
+
+        # Stats
+        quality = rows[0][10] if rows else None
+        type_counts = {}
+        for r in rows:
+            t = r[3]
+            type_counts[t] = type_counts.get(t, 0) + 1
+
+        stats = {
+            "parse_quality": quality,
+            "total_chunks": len(rows),
+            "total_sections": sum(1 for s in sections if s["heading"]),
+            "type_counts": type_counts,
+            "pages": max(r[1] for r in rows) if rows else 0,
+        }
+
+        return {"sections": sections, "cross_refs": cross_refs, "stats": stats}
+    finally:
+        con.close()
+
+
+@app.get("/api/papers/{paper_id}/structure")
+def paper_structure(paper_id: str):
+    """
+    Document structure tree for the Document Explorer view.
+
+    Returns a tree of heading nodes, each with their child chunk
+    summaries (type, first 100 chars of text, chunk_id). Also returns
+    edge counts per type for this paper.
+    """
+    con = get_con()
+    try:
+        tables = [
+            r[0]
+            for r in con.execute(
+                "SELECT table_name FROM information_schema.tables WHERE table_schema='main'"
+            ).fetchall()
+        ]
+
+        if "document_chunks" not in tables:
+            return {"tree": [], "edge_counts": {}}
+
+        # Fetch headings with their contained chunk counts
+        headings = con.execute("""
+            SELECT chunk_id, page_num, section_name, text
+            FROM document_chunks
+            WHERE paper_id = ? AND chunk_type = 'heading'
+            ORDER BY page_num, chunk_order
+        """, [paper_id]).fetchall()
+
+        # For each heading, get its children via containment edges
+        tree = []
+        if "document_edges" in tables:
+            for h_id, h_page, h_section, h_text in headings:
+                children = con.execute("""
+                    SELECT dc.chunk_id, dc.chunk_type, dc.page_num,
+                           LEFT(dc.text, 100) as preview
+                    FROM document_edges de
+                    JOIN document_chunks dc ON de.target_id = dc.chunk_id
+                    WHERE de.source_id = ? AND de.edge_type = 'contains'
+                    ORDER BY dc.page_num, dc.chunk_order
+                """, [h_id]).fetchall()
+
+                tree.append({
+                    "chunk_id": h_id,
+                    "page": h_page,
+                    "section_name": h_section,
+                    "text": h_text[:150],
+                    "children": [
+                        {
+                            "chunk_id": c[0],
+                            "chunk_type": c[1],
+                            "page": c[2],
+                            "preview": c[3],
+                        }
+                        for c in children
+                    ],
+                })
+        else:
+            for h_id, h_page, h_section, h_text in headings:
+                tree.append({
+                    "chunk_id": h_id,
+                    "page": h_page,
+                    "section_name": h_section,
+                    "text": h_text[:150],
+                    "children": [],
+                })
+
+        # Edge counts for this paper
+        edge_counts = {}
+        if "document_edges" in tables:
+            for etype, cnt in con.execute("""
+                SELECT edge_type, COUNT(*) FROM document_edges
+                WHERE paper_id = ? GROUP BY edge_type
+            """, [paper_id]).fetchall():
+                edge_counts[etype] = cnt
+
+        return {"tree": tree, "edge_counts": edge_counts}
     finally:
         con.close()
 

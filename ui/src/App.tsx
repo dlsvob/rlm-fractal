@@ -2,8 +2,11 @@
  * App.tsx — Root component for the fractal database browser.
  *
  * Renders the app shell: a collapsible left sidebar for navigation
- * and a content area that switches between the Citation Graph,
- * Papers table, and SQL Console views.
+ * and a content area that switches between views:
+ *   - Citation Graph (D3 force network)
+ *   - Papers (searchable table)
+ *   - Document Explorer (structure tree for parsed PDFs)
+ *   - SQL Console (ad-hoc queries)
  */
 
 import { useState, useEffect } from 'react';
@@ -11,6 +14,7 @@ import { Layout, Menu, Typography } from 'antd';
 import {
   NodeIndexOutlined,
   FileTextOutlined,
+  ReadOutlined,
   ConsoleSqlOutlined,
   MenuFoldOutlined,
   MenuUnfoldOutlined,
@@ -19,32 +23,27 @@ import {
 import { fetchStats, type KbStats } from './api/client';
 import CitationGraph from './components/CitationGraph';
 import PaperBrowser from './components/PaperBrowser';
+import DocumentExplorer from './components/DocumentExplorer';
 import SqlConsole from './components/SqlConsole';
 
 const { Sider, Header, Content } = Layout;
 const { Text } = Typography;
 
-/** Format large numbers with commas for display. */
 function fmt(n: number): string {
   return n.toLocaleString();
 }
 
 export default function App() {
-  /* Which view is active — drives the sidebar highlight and content area */
   const [activeView, setActiveView] = useState('citation-graph');
-  /* Whether the sidebar is collapsed to icon-only mode */
   const [collapsed, setCollapsed] = useState(false);
-  /* Database stats shown in the header bar */
   const [stats, setStats] = useState<KbStats | null>(null);
 
-  /* Load stats once on mount */
   useEffect(() => {
     fetchStats().then(setStats).catch(console.error);
   }, []);
 
   return (
     <Layout style={{ minHeight: '100vh' }}>
-      {/* === Left sidebar === */}
       <Sider
         collapsible
         collapsed={collapsed}
@@ -52,7 +51,6 @@ export default function App() {
         width={200}
         style={{ borderRight: '1px solid #f0f0f0' }}
       >
-        {/* Collapse toggle button */}
         <div
           style={{
             height: 48,
@@ -67,7 +65,6 @@ export default function App() {
           {collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
         </div>
 
-        {/* Navigation menu — each entry maps to a view */}
         <Menu
           mode="inline"
           selectedKeys={[activeView]}
@@ -75,6 +72,7 @@ export default function App() {
           items={[
             { key: 'citation-graph', icon: <NodeIndexOutlined />, label: 'Citation Graph' },
             { key: 'papers', icon: <FileTextOutlined />, label: 'Papers' },
+            { key: 'documents', icon: <ReadOutlined />, label: 'Documents' },
             { key: 'sql-console', icon: <ConsoleSqlOutlined />, label: 'SQL Console' },
           ]}
           style={{ borderRight: 0 }}
@@ -82,7 +80,6 @@ export default function App() {
       </Sider>
 
       <Layout>
-        {/* === Header bar with database stats === */}
         <Header
           style={{
             background: '#fff',
@@ -101,17 +98,17 @@ export default function App() {
             <div style={{ display: 'flex', gap: 24, marginLeft: 24 }}>
               <Text type="secondary">{fmt(stats.papers)} papers</Text>
               <Text type="secondary">{fmt(stats.citation_edges)} citations</Text>
-              <Text type="secondary">{fmt(stats.genes)} genes</Text>
-              <Text type="secondary">{fmt(stats.claims)} claims</Text>
+              <Text type="secondary">{fmt(stats.chunks)} chunks</Text>
+              <Text type="secondary">{fmt(stats.doc_edges)} edges</Text>
               <Text type="secondary">{fmt(stats.pdfs)} PDFs</Text>
             </div>
           )}
         </Header>
 
-        {/* === Main content area === */}
         <Content style={{ padding: 24, background: '#fff', overflow: 'auto' }}>
           {activeView === 'citation-graph' && <CitationGraph />}
           {activeView === 'papers' && <PaperBrowser />}
+          {activeView === 'documents' && <DocumentExplorer />}
           {activeView === 'sql-console' && <SqlConsole />}
         </Content>
       </Layout>

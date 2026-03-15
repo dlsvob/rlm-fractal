@@ -30,6 +30,8 @@ export interface KbStats {
   citation_edges: number;
   claims: number;
   pdfs: number;
+  chunks: number;
+  doc_edges: number;
   organs: Record<string, number>;
 }
 
@@ -131,4 +133,65 @@ export function fetchPaperDetail(paperId: string): Promise<PaperDetail> {
 export function executeQuery(sql: string): Promise<SqlResult> {
   const qs = new URLSearchParams({ sql });
   return get<SqlResult>(`/api/query?${qs.toString()}`);
+}
+
+
+/* === Document types === */
+
+export interface DocChunk {
+  chunk_id: number;
+  page_num: number;
+  chunk_type: string;
+  section_name: string | null;
+  text: string;
+  font_size: number | null;
+}
+
+export interface DocSection {
+  heading: DocChunk | null;
+  section_name: string | null;
+  chunks: DocChunk[];
+}
+
+export interface CrossRef {
+  source_id: number;
+  target_id: number;
+}
+
+export interface DocumentData {
+  sections: DocSection[];
+  cross_refs: CrossRef[];
+  stats: {
+    parse_quality: string;
+    total_chunks: number;
+    total_sections: number;
+    type_counts: Record<string, number>;
+    pages: number;
+  } | null;
+}
+
+export interface StructureNode {
+  chunk_id: number;
+  page: number;
+  section_name: string | null;
+  text: string;
+  children: {
+    chunk_id: number;
+    chunk_type: string;
+    page: number;
+    preview: string;
+  }[];
+}
+
+export interface StructureData {
+  tree: StructureNode[];
+  edge_counts: Record<string, number>;
+}
+
+export function fetchPaperDocument(paperId: string): Promise<DocumentData> {
+  return get<DocumentData>(`/api/papers/${encodeURIComponent(paperId)}/document`);
+}
+
+export function fetchPaperStructure(paperId: string): Promise<StructureData> {
+  return get<StructureData>(`/api/papers/${encodeURIComponent(paperId)}/structure`);
 }
