@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Build artifacts
+fractal.duckdb
+
+# Large data files — PDFs are fetched via fetch_pdfs.py
+pdfs/
+
+# Frontend
+ui/node_modules/
+ui/dist/
+
+# Editor
+.vscode/
