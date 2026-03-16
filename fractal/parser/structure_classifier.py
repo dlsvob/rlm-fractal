@@ -90,10 +90,15 @@ def detect_body_font_size(chunks: list[TextChunk]) -> Optional[float]:
 
     Returns None if no chunks have font size information.
     """
-    # Count total characters at each font size (rounded to 1 decimal)
+    # Count total characters at each font size (rounded to 1 decimal).
+    # Filter out degenerate sizes < 4pt — many PDFs report 1.0pt for
+    # invisible spacer elements or because the text matrix scale factor
+    # was misread. These would poison the body size detection.
+    MIN_PLAUSIBLE_PT = 4.0
+
     size_chars: Counter[float] = Counter()
     for chunk in chunks:
-        if chunk.font_size > 0 and chunk.text:
+        if chunk.font_size >= MIN_PLAUSIBLE_PT and chunk.text:
             rounded = round(chunk.font_size, 1)
             size_chars[rounded] += len(chunk.text)
 

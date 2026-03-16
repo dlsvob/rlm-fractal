@@ -58,6 +58,146 @@ def get_con() -> duckdb.DuckDBPyConnection:
 # === Endpoints ===
 
 
+@app.get("/api/documents")
+def documents(
+    page: int = Query(1, ge=1),
+    per_page: int = Query(20, ge=1, le=100),
+    q: str | None = Query(None),
+    quality: str | None = Query(None),
+    organ: str | None = Query(None),
+    has_sections: bool | None = Query(None),
+    sort: str | None = Query(None),
+):
+    """
+    Paginated list of papers that have parsed document chunks.
+
+    Each item includes parse stats: quality tier, chunk count, heading
+    count, section count, page count. Filterable by quality tier
+    (tagged/heuristic), organ, search query, and whether sections
+    were detected.
+    """
+    con = get_con()
+    try:
+        tables = [
+            r[0]
+            for r in con.execute(
+                "SELECT table_name FROM information_schema.tables WHERE table_schema='main'"
+            ).fetchall()
+        ]
+        if "document_chunks" not in tables:
+            return {"items": [], "total": 0, "page": page, "per_page": per_page}
+
+        # Build the base query: aggregate document_chunks per paper
+        # joined with papers for title/year/venue
+        conditions = []
+        params = []
+
+        if quality:
+            conditions.append("dc.parse_quality = ?")
+            params.append(quality)
+
+        if q:
+            conditions.append("(p.title ILIKE ? OR p.abstract ILIKE ?)")
+            params.extend([f"%{q}%", f"%{q}%"])
+
+        if organ and "paper_organs" in tables:
+            conditions.append("p.paper_id IN (SELECT paper_id FROM paper_organs WHERE organ = ?)")
+            params.append(organ)
+
+        where = " AND ".join(conditions) if conditions else "1=1"
+
+        # Having clause for section filter
+        having = ""
+        if has_sections is True:
+            having = "HAVING COUNT(DISTINCT dc.section_name) > 0"
+        elif has_sections is False:
+            having = "HAVING COUNT(DISTINCT dc.section_name) = 0"
+
+        # Count total matching papers
+        count_sql = f"""
+            SELECT COUNT(*) FROM (
+                SELECT dc.paper_id
+                FROM document_chunks dc
+                JOIN papers p ON dc.paper_id = p.paper_id
+                WHERE {where}
+                GROUP BY dc.paper_id
+                {having}
+            ) sub
+        """
+        total = con.execute(count_sql, params).fetchone()[0]
+
+        # Sort — whitelist allowed columns to prevent injection
+        allowed_doc_sorts = {
+            "chunk_count", "heading_count", "section_count",
+            "page_count", "paragraph_count", "table_cell_count",
+            "reference_count", "year", "title",
+        }
+        order_clause = "chunk_count DESC"
+        if sort:
+            desc = sort.startswith("-")
+            col = sort.lstrip("-")
+            if col in allowed_doc_sorts:
+                direction = "DESC" if desc else "ASC"
+                # year and title come from the papers table alias
+                prefix = "p." if col in ("year", "title") else ""
+                order_clause = f"{prefix}{col} {direction} NULLS LAST"
+
+        # Fetch page of results with aggregated stats
+        offset = (page - 1) * per_page
+        rows = con.execute(
+            f"""
+            SELECT
+                dc.paper_id,
+                p.title,
+                p.year,
+                p.venue,
+                MAX(dc.parse_quality) as parse_quality,
+                COUNT(*) as chunk_count,
+                COUNT(CASE WHEN dc.chunk_type = 'heading' THEN 1 END) as heading_count,
+                COUNT(DISTINCT dc.section_name) as section_count,
+                MAX(dc.page_num) as page_count,
+                COUNT(CASE WHEN dc.chunk_type = 'paragraph' THEN 1 END) as paragraph_count,
+                COUNT(CASE WHEN dc.chunk_type = 'table_cell' THEN 1 END) as table_cell_count,
+                COUNT(CASE WHEN dc.chunk_type = 'reference' THEN 1 END) as reference_count
+            FROM document_chunks dc
+            JOIN papers p ON dc.paper_id = p.paper_id
+            WHERE {where}
+            GROUP BY dc.paper_id, p.title, p.year, p.venue
+            {having}
+            ORDER BY {order_clause}
+            LIMIT ? OFFSET ?
+            """,
+            params + [per_page, offset],
+        ).fetchall()
+
+        items = [
+            {
+                "paper_id": r[0],
+                "title": r[1],
+                "year": r[2],
+                "venue": r[3],
+                "parse_quality": r[4],
+                "chunk_count": r[5],
+                "heading_count": r[6],
+                "section_count": r[7],
+                "page_count": r[8],
+                "paragraph_count": r[9],
+                "table_cell_count": r[10],
+                "reference_count": r[11],
+            }
+            for r in rows
+        ]
+
+        return {
+            "items": items,
+            "total": total,
+            "page": page,
+            "per_page": per_page,
+        }
+    finally:
+        con.close()
+
+
 @app.get("/api/stats")
 def stats():
     """
